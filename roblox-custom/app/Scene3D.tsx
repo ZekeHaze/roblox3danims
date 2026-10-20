@@ -11,19 +11,19 @@ interface JointInfo {
   name: string;
   pivotGroup: THREE.Group;
   mesh: THREE.Mesh;
+  originalMaterial: THREE.Material | THREE.Material[];
 }
 
-const BONE_PRESETS = {
-  ROBLOX_R6: [
-    { name: 'HumanoidRootPart', pos: [0, 0, 0], parent: null },
-    { name: 'Torso', pos: [0, 1, 0], parent: 'HumanoidRootPart' },
-    { name: 'Head', pos: [0, 2, 0], parent: 'Torso' },
-    { name: 'LeftArm', pos: [-1.5, 1, 0], parent: 'Torso' },
-    { name: 'RightArm', pos: [1.5, 1, 0], parent: 'Torso' },
-    { name: 'LeftLeg', pos: [-0.5, -1, 0], parent: 'Torso' },
-    { name: 'RightLeg', pos: [0.5, -1, 0], parent: 'Torso' },
-  ],
-};
+type RigStep = 'Head' | 'Torso' | 'LeftArm' | 'RightArm' | 'LeftLeg' | 'RightLeg';
+
+const RIG_STEPS: { key: RigStep; title: string; description: string }[] = [
+  { key: 'Head', title: '1. Cabeza y Accesorios/Pelo', description: 'Selecciona las partes de la cabeza y pulsa Vincular.' },
+  { key: 'Torso', title: '2. Torso y Accesorios', description: 'Selecciona las partes del torso y pulsa Vincular.' },
+  { key: 'LeftArm', title: '3. Brazo Izquierdo y Accesorios', description: 'Selecciona las partes del brazo izquierdo y pulsa Vincular.' },
+  { key: 'RightArm', title: '4. Brazo Derecho y Accesorios', description: 'Selecciona las partes del brazo derecho y pulsa Vincular.' },
+  { key: 'LeftLeg', title: '5. Pierna Izquierda y Calzado', description: 'Selecciona las partes de la pierna izquierda y pulsa Vincular.' },
+  { key: 'RightLeg', title: '6. Pierna Derecha y Calzado', description: 'Selecciona las partes de la pierna derecha y pulsa Vincular.' },
+];
 
 export default function Scene3D() {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -33,25 +33,47 @@ export default function Scene3D() {
   const [stats, setStats] = useState({ vertices: 0, triangles: 0 });
   const [fileName, setFileName] = useState<string>('Ningún archivo cargado');
 
-  // Modos de transformación: 'rotate' (aros), 'translate' (flechas X, Y, Z), 'pivot' (ajustar origen)
-  const [transformMode, setTransformMode] = useState<'rotate' | 'translate' | 'pivot'>('rotate');
+  const [showWizard, setShowWizard] = useState<boolean>(false);
+  const [currentStepIdx, setCurrentStepIdx] = useState<number>(0);
 
-  // Offset manual del pivote
-  const [pivotOffset, setPivotOffset] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+  const [transformMode, setTransformMode] = useState<'rotate' | 'translate'>('rotate');
 
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rootCharacterGroupRef = useRef<THREE.Group | null>(null);
   const transformControlsRef = useRef<TransformControls | null>(null);
+  const jointsRef = useRef<JointInfo[]>([]);
+  const showWizardRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    jointsRef.current = joints;
+  }, [joints]);
+
+  useEffect(() => {
+    showWizardRef.current = showWizard;
+    if (showWizard && transformControlsRef.current) {
+      transformControlsRef.current.detach();
+    }
+  }, [showWizard]);
+
+  // Material Azul de Resaltado
+  const highlightMaterial = useRef(
+    new THREE.MeshStandardMaterial({
+      color: 0x3b82f6,
+      emissive: 0x1d4ed8,
+      emissiveIntensity: 0.8,
+      roughness: 0.2,
+      side: THREE.DoubleSide
+    })
+  ).current;
 
   useEffect(() => {
     if (!mountRef.current) return;
 
-    // 1. Escena
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#222225');
     sceneRef.current = scene;
 
-    // 2. Cámara
     const camera = new THREE.PerspectiveCamera(
       45,
       mountRef.current.clientWidth / mountRef.current.clientHeight,
@@ -59,30 +81,44 @@ export default function Scene3D() {
       1000
     );
     camera.position.set(0, 3, 10);
+    cameraRef.current = camera;
 
-    // 3. Renderizador
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
     mountRef.current.innerHTML = '';
     mountRef.current.appendChild(renderer.domElement);
 
-    // 4. Controles de Órbita
     const orbitControls = new OrbitControls(camera, renderer.domElement);
     orbitControls.enableDamping = true;
     orbitControls.dampingFactor = 0.05;
 
-    // 5. Controles de Transformación
     const transformControls = new TransformControls(camera, renderer.domElement);
     transformControls.setMode('rotate');
     transformControlsRef.current = transformControls;
+
+    // RENDERIZADO SUPERPUESTO (Evita que el personaje bloquee los clic en los aros/flechas)
+    const helper = transformControls.getHelper();
+    helper.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach((m) => {
+            m.depthTest = false;
+            m.depthWrite = false;
+          });
+        } else if (mesh.material) {
+          mesh.material.depthTest = false;
+          mesh.material.depthWrite = false;
+        }
+      }
+    });
 
     transformControls.addEventListener('dragging-changed', (event) => {
       orbitControls.enabled = !event.value;
     });
 
-    scene.add(transformControls.getHelper());
+    scene.add(helper);
 
-    // 6. Luces
     const ambientLight = new THREE.AmbientLight(0xffffff, 2.2);
     scene.add(ambientLight);
 
@@ -98,7 +134,46 @@ export default function Scene3D() {
     dirLight2.position.set(-5, 5, -5);
     scene.add(dirLight2);
 
-    // Resize
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!mountRef.current || !cameraRef.current || !sceneRef.current) return;
+
+      const rect = mountRef.current.getBoundingClientRect();
+      mouse.x = ((event.clientX - rect.left) / mountRef.current.clientWidth) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / mountRef.current.clientHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, cameraRef.current);
+
+      if (rootCharacterGroupRef.current) {
+        const intersects = raycaster.intersectObjects(rootCharacterGroupRef.current.children, true);
+        if (intersects.length > 0) {
+          const hitObject = intersects[0].object as THREE.Mesh;
+
+          const foundJoint = jointsRef.current.find((j) => {
+            if (j.mesh === hitObject) return true;
+            let isInside = false;
+            j.pivotGroup.traverse((child) => {
+              if (child === hitObject) isInside = true;
+            });
+            return isInside;
+          });
+
+          if (foundJoint) {
+            if (showWizardRef.current) {
+              toggleCheckJoint(foundJoint.id);
+            } else {
+              selectJoint(foundJoint);
+            }
+          }
+        }
+      }
+    };
+
+    const domElement = renderer.domElement;
+    domElement.addEventListener('pointerdown', handlePointerDown);
+
     const handleResize = () => {
       if (!mountRef.current) return;
       camera.aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
@@ -107,7 +182,6 @@ export default function Scene3D() {
     };
     window.addEventListener('resize', handleResize);
 
-    // Render loop
     let animId: number;
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -118,6 +192,7 @@ export default function Scene3D() {
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      domElement.removeEventListener('pointerdown', handlePointerDown);
       cancelAnimationFrame(animId);
       if (mountRef.current && renderer.domElement) {
         mountRef.current.removeChild(renderer.domElement);
@@ -125,87 +200,123 @@ export default function Scene3D() {
     };
   }, []);
 
-  // Cambiar herramienta
-  const handleModeChange = (mode: 'rotate' | 'translate' | 'pivot') => {
-    setTransformMode(mode);
-    if (!transformControlsRef.current) return;
+  // Iluminar una parte específica en azul
+  const applyHighlight = (jointIdToHighlight: string | null) => {
+    joints.forEach((j) => {
+      const applyToMesh = (mesh: THREE.Mesh, isHighlighted: boolean) => {
+        mesh.material = isHighlighted ? highlightMaterial : j.originalMaterial;
+      };
 
-    if (mode === 'rotate') {
-      transformControlsRef.current.setMode('rotate');
-    } else {
-      transformControlsRef.current.setMode('translate');
-    }
+      const isMatch = j.id === jointIdToHighlight;
+      if (typeof j.pivotGroup.traverse === 'function') {
+        j.pivotGroup.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            applyToMesh(child as THREE.Mesh, isMatch);
+          }
+        });
+      } else {
+        applyToMesh(j.mesh, isMatch);
+      }
+    });
+  };
+
+  // Iluminar múltiples partes seleccionadas en azul
+  const applyHighlightMultiple = (jointIdsToHighlight: string[]) => {
+    joints.forEach((j) => {
+      const isChecked = jointIdsToHighlight.includes(j.id);
+      const applyToMesh = (mesh: THREE.Mesh, isHighlighted: boolean) => {
+        mesh.material = isHighlighted ? highlightMaterial : j.originalMaterial;
+      };
+
+      if (typeof j.pivotGroup.traverse === 'function') {
+        j.pivotGroup.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            applyToMesh(child as THREE.Mesh, isChecked);
+          }
+        });
+      } else {
+        applyToMesh(j.mesh, isChecked);
+      }
+    });
+  };
+
+  const handleModeChange = (mode: 'rotate' | 'translate') => {
+    setTransformMode(mode);
+    if (!transformControlsRef.current || showWizard) return;
+    transformControlsRef.current.setMode(mode);
 
     const selectedJoint = joints.find((j) => j.id === selectedJointId);
     if (selectedJoint) {
-      transformControlsRef.current.attach(
-        mode === 'pivot' ? selectedJoint.mesh : selectedJoint.pivotGroup
-      );
+      transformControlsRef.current.attach(selectedJoint.pivotGroup);
     }
   };
 
   const selectJoint = (jointInfo: JointInfo) => {
+    if (showWizard) return;
     setSelectedJointId(jointInfo.id);
-    setPivotOffset({
-      x: jointInfo.mesh.position.x,
-      y: jointInfo.mesh.position.y,
-      z: jointInfo.mesh.position.z
-    });
+    applyHighlight(jointInfo.id);
 
     if (transformControlsRef.current) {
-      transformControlsRef.current.attach(
-        transformMode === 'pivot' ? jointInfo.mesh : jointInfo.pivotGroup
-      );
+      transformControlsRef.current.attach(jointInfo.pivotGroup);
     }
   };
 
   const clearSelection = () => {
     setSelectedJointId(null);
+    applyHighlight(null);
     if (transformControlsRef.current) {
       transformControlsRef.current.detach();
     }
   };
 
-  // Mover offset del pivote
-  const updatePivotOffset = (axis: 'x' | 'y' | 'z', value: number) => {
-    const selectedJoint = joints.find((j) => j.id === selectedJointId);
-    if (!selectedJoint) return;
-
-    const newOffset = { ...pivotOffset, [axis]: value };
-    setPivotOffset(newOffset);
-
-    selectedJoint.mesh.position.set(-newOffset.x, -newOffset.y, -newOffset.z);
-    selectedJoint.pivotGroup.position.set(newOffset.x, newOffset.y, newOffset.z);
-  };
-
-  // Manejador de casillas de verificación
   const toggleCheckJoint = (id: string) => {
-    setCheckedJointIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-    );
+    setCheckedJointIds((prev) => {
+      const isChecking = !prev.includes(id);
+      const updated = isChecking ? [...prev, id] : prev.filter((item) => item !== id);
+      applyHighlightMultiple(updated);
+      return updated;
+    });
   };
 
-  // FUNCIONALIDAD: AGRUPAR RIGS / ARTICULACIONES
-  const groupSelectedJoints = () => {
-    if (checkedJointIds.length < 2) {
-      alert('Debes seleccionar al menos 2 partes usando las casillas de verificación para agruparlas.');
-      return;
+  const handleConfirmStep = () => {
+    const currentStep = RIG_STEPS[currentStepIdx];
+    if (checkedJointIds.length > 0) {
+      groupJointsByLimb(currentStep.key, checkedJointIds);
     }
 
-    const selectedJointsToGroup = joints.filter((j) => checkedJointIds.includes(j.id));
-    const remainingJoints = joints.filter((j) => !checkedJointIds.includes(j.id));
+    setCheckedJointIds([]);
+    applyHighlight(null);
 
-    // Crear un nuevo grupo contenedor en Three.js
+    if (currentStepIdx + 1 < RIG_STEPS.length) {
+      setCurrentStepIdx(currentStepIdx + 1);
+    } else {
+      setShowWizard(false);
+    }
+  };
+
+  // CALCULO CORRECTO DE PIVOTES SEGÚN EXTREMIDAD
+  const groupJointsByLimb = (limbKey: string, jointIdsToGroup: string[]) => {
+    const selectedJointsToGroup = joints.filter((j) => jointIdsToGroup.includes(j.id));
+    const remainingJoints = joints.filter((j) => !jointIdsToGroup.includes(j.id));
+
+    if (selectedJointsToGroup.length === 0) return;
+
     const groupContainer = new THREE.Group();
-    groupContainer.name = `Grupo_${selectedJointsToGroup.map((j) => j.name).join('_')}`;
+    groupContainer.name = `Group_${limbKey}`;
 
-    // Calcular la posición central del nuevo grupo
     const box = new THREE.Box3();
     selectedJointsToGroup.forEach((j) => box.expandByObject(j.pivotGroup));
     const center = box.getCenter(new THREE.Vector3());
+
+    // Posicionamiento preciso del pivote
+    if (limbKey.includes('Arm') || limbKey.includes('Leg')) {
+      center.y = box.max.y; // Articulación superior (hombros / cadera)
+    } else if (limbKey.includes('Head')) {
+      center.y = box.min.y; // Base del cuello
+    }
+
     groupContainer.position.copy(center);
 
-    // Adjuntar los pivotes existentes dentro del grupo contenedor
     selectedJointsToGroup.forEach((j) => {
       j.pivotGroup.position.sub(center);
       groupContainer.add(j.pivotGroup);
@@ -215,19 +326,15 @@ export default function Scene3D() {
       rootCharacterGroupRef.current.add(groupContainer);
     }
 
-    // Crear la nueva articulación unificada
-    const newGroupId = `group_${Date.now()}`;
     const newGroupJoint: JointInfo = {
-      id: newGroupId,
-      name: `🔗 Grupo Uni (${selectedJointsToGroup.length} Partes)`,
+      id: `joint_group_${limbKey}_${Date.now()}`,
+      name: `🦴 ${limbKey} (${selectedJointsToGroup.length} partes)`,
       pivotGroup: groupContainer,
-      mesh: selectedJointsToGroup[0].mesh // Referencia primaria
+      mesh: selectedJointsToGroup[0].mesh,
+      originalMaterial: selectedJointsToGroup[0].originalMaterial
     };
 
-    const updatedJoints = [newGroupJoint, ...remainingJoints];
-    setJoints(updatedJoints);
-    setCheckedJointIds([]);
-    selectJoint(newGroupJoint);
+    setJoints([newGroupJoint, ...remainingJoints]);
   };
 
   const createJointNode = (mesh: THREE.Mesh): THREE.Group => {
@@ -237,15 +344,8 @@ export default function Scene3D() {
     const box = new THREE.Box3().setFromObject(mesh);
     const center = box.getCenter(new THREE.Vector3());
 
-    const nameLower = (mesh.name || '').toLowerCase();
-    let pivotPosition = center.clone();
-
-    if (nameLower.includes('arm') || nameLower.includes('leg') || nameLower.includes('head') || nameLower.includes('hand') || nameLower.includes('rig')) {
-      pivotPosition.y = box.max.y;
-    }
-
-    pivotGroup.position.copy(pivotPosition);
-    mesh.position.sub(pivotPosition);
+    pivotGroup.position.copy(center);
+    mesh.position.sub(center);
     pivotGroup.add(mesh);
 
     return pivotGroup;
@@ -290,7 +390,8 @@ export default function Scene3D() {
     }
 
     meshesFound.forEach((mesh, index) => {
-      mesh.material = texturedMaterial || defaultMaterial;
+      const origMat = texturedMaterial || defaultMaterial;
+      mesh.material = origMat;
 
       const pivotGroup = createJointNode(mesh);
       mainCharacterGroup.add(pivotGroup);
@@ -300,7 +401,8 @@ export default function Scene3D() {
         id: jointId,
         name: mesh.name || `Parte ${index + 1}`,
         pivotGroup: pivotGroup,
-        mesh: mesh
+        mesh: mesh,
+        originalMaterial: origMat
       });
 
       if (mesh.geometry) {
@@ -328,45 +430,11 @@ export default function Scene3D() {
     sceneRef.current.add(mainCharacterGroup);
     setJoints(jointList);
     setStats({ vertices: totalVertices, triangles: Math.round(totalTriangles) });
+
+    setCurrentStepIdx(0);
+    setShowWizard(true);
   };
-const applyRobloxRig = () => {
-    if (!rootCharacterGroupRef.current || !sceneRef.current) {
-      alert('Primero debes cargar un modelo 3D en la escena.');
-      return;
-    }
 
-    const presetData = BONE_PRESETS.ROBLOX_R6;
-    const bonesMap: { [key: string]: THREE.Bone } = {};
-    const bonesList: THREE.Bone[] = [];
-
-    presetData.forEach((b) => {
-      const bone = new THREE.Bone();
-      bone.name = b.name;
-      bone.position.set(b.pos[0], b.pos[1], b.pos[2]);
-      bonesMap[b.name] = bone;
-      bonesList.push(bone);
-    });
-
-    presetData.forEach((b) => {
-      if (b.parent && bonesMap[b.parent]) {
-        bonesMap[b.parent].add(bonesMap[b.name]);
-      }
-    });
-
-    const skeletonRoot = new THREE.Group();
-    skeletonRoot.name = 'Rig_Roblox_R6';
-    skeletonRoot.add(bonesList[0]);
-
-    const skeleton = new THREE.Skeleton(bonesList);
-
-    rootCharacterGroupRef.current.add(skeletonRoot);
-
-    const skeletonHelper = new THREE.SkeletonHelper(skeletonRoot);
-    (skeletonHelper as any).material.linewidth = 3;
-    sceneRef.current.add(skeletonHelper);
-
-    alert('¡Esqueleto de Roblox R6 aplicado con éxito!');
-  };
   const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -431,7 +499,7 @@ const applyRobloxRig = () => {
     }
   };
 
-  const selectedJoint = joints.find((j) => j.id === selectedJointId);
+  const currentStep = RIG_STEPS[currentStepIdx];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#18181b', color: '#fff' }}>
@@ -462,43 +530,8 @@ const applyRobloxRig = () => {
           </span>
         </div>
 
-        {/* Botones de acción y herramientas */}
-        {joints.length > 0 && (
+        {!showWizard && joints.length > 0 && (
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <button
-              onClick={applyRobloxRig}
-              style={{
-                backgroundColor: '#7c3aed',
-                color: '#fff',
-                border: 'none',
-                padding: '6px 12px',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '12px',
-                fontWeight: '600'
-              }}
-            >
-              🦴 Aplicar Rig Roblox R6
-            </button>
-
-            {checkedJointIds.length >= 2 && (
-              <button
-                onClick={groupSelectedJoints}
-                style={{
-                  backgroundColor: '#16a34a',
-                  color: '#fff',
-                  border: 'none',
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                  fontWeight: '600'
-                }}
-              >
-                🔗 Agrupar Selección ({checkedJointIds.length})
-              </button>
-            )}
-
             <button
               onClick={() => handleModeChange('rotate')}
               style={{
@@ -529,21 +562,6 @@ const applyRobloxRig = () => {
             >
               ⤞ Mover (X, Y, Z)
             </button>
-            <button
-              onClick={() => handleModeChange('pivot')}
-              style={{
-                backgroundColor: transformMode === 'pivot' ? '#2563eb' : '#3f3f46',
-                color: '#fff',
-                border: 'none',
-                padding: '6px 12px',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '12px',
-                fontWeight: '600'
-              }}
-            >
-              🎯 Ajustar Pivote
-            </button>
             {selectedJointId && (
               <button
                 onClick={clearSelection}
@@ -567,13 +585,15 @@ const applyRobloxRig = () => {
       {/* Visor 3D y Controles */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         
-        {/* Panel Izquierdo: Lista de Articulaciones con Selección Múltiple */}
-        <div style={{ width: '260px', background: '#18181b', padding: '15px', overflowY: 'auto', borderRight: '1px solid #27272a' }}>
+        {/* Panel Izquierdo */}
+        <div style={{ width: '280px', background: '#18181b', padding: '15px', overflowY: 'auto', borderRight: '1px solid #27272a', zIndex: 10 }}>
           <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', textTransform: 'uppercase', color: '#71717a' }}>
-            Articulaciones ({joints.length})
+            Partes Disponibles ({joints.length})
           </h4>
           <p style={{ fontSize: '11px', color: '#a1a1aa', margin: '0 0 12px 0' }}>
-            Marca las casillas para seleccionar múltiples partes y luego pulsa <strong>Agrupar Selección</strong>:
+            {showWizard
+              ? `Haz clic en las partes en la lista o en el visor 3D para marcar/desmarcar:`
+              : 'Haz clic en cualquier parte en el visor 3D para moverla directamente:'}
           </p>
           {joints.map((j) => {
             const isSelected = j.id === selectedJointId;
@@ -582,33 +602,45 @@ const applyRobloxRig = () => {
             return (
               <div
                 key={j.id}
+                onClick={() => {
+                  if (showWizard) {
+                    toggleCheckJoint(j.id);
+                  } else {
+                    selectJoint(j);
+                  }
+                }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '8px',
-                  padding: '6px 8px',
+                  gap: '10px',
+                  padding: '8px 10px',
                   fontSize: '12px',
                   color: isSelected ? '#fff' : '#d4d4d8',
-                  backgroundColor: isSelected ? '#2563eb' : 'transparent',
+                  backgroundColor: isSelected ? '#2563eb' : isChecked ? '#1e293b' : 'transparent',
                   borderRadius: '6px',
                   marginBottom: '4px',
-                  border: isSelected ? '1px solid #60a5fa' : '1px solid transparent'
+                  border: isSelected ? '1px solid #60a5fa' : isChecked ? '1px solid #3b82f6' : '1px solid transparent',
+                  cursor: 'pointer'
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => toggleCheckJoint(j.id)}
-                  style={{ cursor: 'pointer' }}
-                />
+                {showWizard && (
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleCheckJoint(j.id);
+                    }}
+                    style={{ cursor: 'pointer', width: '15px', height: '15px' }}
+                  />
+                )}
                 <span
-                  onClick={() => selectJoint(j)}
                   style={{
                     flex: 1,
-                    cursor: 'pointer',
                     textOverflow: 'ellipsis',
                     overflow: 'hidden',
-                    whiteSpace: 'nowrap'
+                    whiteSpace: 'nowrap',
+                    fontWeight: isSelected || isChecked ? 'bold' : 'normal'
                   }}
                 >
                   {j.name}
@@ -618,42 +650,77 @@ const applyRobloxRig = () => {
           })}
         </div>
 
-        {/* Canvas 3D */}
+        {/* Canvas 3D Central */}
         <div ref={mountRef} style={{ flex: 1, height: '100%' }} />
 
-        {/* Panel Derecho: Detalles */}
-        <div style={{ width: '240px', background: '#18181b', padding: '15px', borderLeft: '1px solid #27272a', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+        {/* Panel Derecho */}
+        <div style={{ width: '280px', background: '#18181b', padding: '15px', borderLeft: '1px solid #27272a', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto' }}>
+          
+          {showWizard && (
+            <div style={{
+              backgroundColor: '#27272a',
+              border: '2px solid #3b82f6',
+              borderRadius: '10px',
+              padding: '14px',
+              boxShadow: '0 4px 15px rgba(0,0,0,0.3)'
+            }}>
+              <h3 style={{ margin: '0 0 6px 0', fontSize: '13px', color: '#60a5fa' }}>
+                🛠️ Agrupar Partes ({currentStepIdx + 1}/{RIG_STEPS.length})
+              </h3>
+              <h4 style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#fff' }}>
+                {currentStep?.title}
+              </h4>
+              <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: '#a1a1aa' }}>
+                {currentStep?.description}
+              </p>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <button
+                  onClick={handleConfirmStep}
+                  style={{
+                    backgroundColor: '#2563eb',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  Vincular y Siguiente ➔
+                </button>
+                <button
+                  onClick={() => {
+                    setCheckedJointIds([]);
+                    applyHighlight(null);
+                    if (currentStepIdx + 1 < RIG_STEPS.length) {
+                      setCurrentStepIdx(currentStepIdx + 1);
+                    } else {
+                      setShowWizard(false);
+                    }
+                  }}
+                  style={{
+                    backgroundColor: '#3f3f46',
+                    color: '#d4d4d8',
+                    border: 'none',
+                    padding: '6px 12px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '11px'
+                  }}
+                >
+                  Omitir Paso
+                </button>
+              </div>
+            </div>
+          )}
+
           <div>
             <h4 style={{ margin: '0 0 12px 0', fontSize: '12px', textTransform: 'uppercase', color: '#71717a' }}>Detalles</h4>
             <div style={{ marginBottom: '8px', color: '#a1a1aa' }}>Vértices: <strong style={{ color: '#fff' }}>{stats.vertices.toLocaleString()}</strong></div>
             <div style={{ marginBottom: '8px', color: '#a1a1aa' }}>Triángulos: <strong style={{ color: '#fff' }}>{stats.triangles.toLocaleString()}</strong></div>
           </div>
-
-          {/* Editor de Posición de Pivote */}
-          {selectedJoint && transformMode === 'pivot' && (
-            <div style={{ borderTop: '1px solid #27272a', paddingTop: '15px' }}>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '12px', textTransform: 'uppercase', color: '#60a5fa' }}>
-                Ajustar Pivote: {selectedJoint.name}
-              </h4>
-              {(['x', 'y', 'z'] as const).map((axis) => (
-                <div key={axis} style={{ marginBottom: '10px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#d4d4d8', marginBottom: '4px' }}>
-                    <span style={{ textTransform: 'uppercase', fontWeight: 'bold' }}>Eje {axis}:</span>
-                    <span>{pivotOffset[axis].toFixed(2)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="-5"
-                    max="5"
-                    step="0.05"
-                    value={pivotOffset[axis]}
-                    onChange={(e) => updatePivotOffset(axis, parseFloat(e.target.value))}
-                    style={{ width: '100%', cursor: 'pointer' }}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
       </div>
